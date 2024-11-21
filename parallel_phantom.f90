@@ -17,7 +17,7 @@ program phantom
 ! Input parameters that define the problem:
    character(len=80)           :: arg, value
 
-   integer                     :: n, nx, ny, i, k
+   integer                     :: n, nx, ny, p, k, l, i
    real(kind=8)                :: stddev, err, lambda
    real(kind=8), allocatable   :: f_phantom(:,:)[:], f_noisy(:,:)[:], f_filtered(:,:)[:]
    real(kind = 8) :: f_test(512,512)
@@ -30,11 +30,8 @@ program phantom
 ! For parallelizing the program
    integer :: np, me
 
-
-
    me = this_image()
    np = num_images()
-
 
    if (me == 1) then
       write(*,*) 
@@ -103,28 +100,27 @@ program phantom
    call distribute_image( f_phantom, n, me, np )
    sync all
 
-   if (me == 4) then
-      call gif_images(f_phantom, f_noisy)
-   end if
-
 ! Add noise
    call add_noise( f_phantom, f_noisy, stddev, n, me, np )
    sync all
 
 ! Reassemble the image in the main processor
-   ! if (me == 1) then
-   !    do k = 2, np
-   !       f_noisy((k-1)*nx : k*nx , (k-1)*ny : ny)[me] = f_noisy( (k-1)*nx : k*nx , (k-1)*ny : ny)[k]
-   !    end do
-   ! end if
+   if (me == 1) then
+      do p = 2, np
+         k = nx*(mod(p-1, int(sqrt( real(np) ))))
+         l = ny*( (p-1)/int(sqrt( real(np) )))
+
+         f_noisy(k+1 : k+nx, l + 1 : l+ny) = f_noisy(k+1 : k+nx, l + 1 : l+ny)[p]
+      end do
+   end if
    sync all
 
 ! Write the image to file
-   ! if (me == 1) then
-   !    call gif_images(f_phantom, f_noisy)
-   !    call system_clock ( t1, clock_rate, clock_max )
-   !    write(*,'(a,e8.2)') 'Time: ',real(t1-t0)/real(clock_rate)
-   ! end if
+   if (me == 1) then
+      call gif_images(f_phantom, f_noisy)
+      call system_clock ( t1, clock_rate, clock_max )
+      write(*,'(a,e8.2)') 'Time: ',real(t1-t0)/real(clock_rate)
+   end if
    
 ! Timing for adding noise and filtering (part of the program that will be parallelised)
    call system_clock ( tb, clock_rate, clock_max )
@@ -136,18 +132,20 @@ subroutine distribute_image( f_phantom, n, me, np)
    real(kind=8)              :: f_phantom(:,:)[*]
    integer, intent(in)       :: n, me, np
 
-   integer :: i, j, k, l, p, nx, ny
+   integer :: i, j, k, l, m, p, nx, ny
 
-   nx = n/int(sqrt( real(np) ))
-   ny = n/int(sqrt( real(np) ))
+   p = int(sqrt( real(np) ))
+   nx = n/p
+   ny = n/p
 
-   do i = 1, nx
-      do j = 1, ny
-         k = (p-1)*nx + i
-         l = (p-1)*ny + j
-         f_phantom(i,j) = f_phantom(i,j)[1]
+   if (me == 1) then
+      do m = 1, np
+         k = nx*(mod(m-1, p))
+         l = ny*( (m-1)/p)
+
+         f_phantom(k+1 : k+nx, l + 1 : l+ny)[m] = f_phantom(k+1 : k+nx, l + 1 : l+ny)[1]
       end do
-   end do
+   end if
 end subroutine distribute_image
 
 subroutine add_noise( f_phantom, f_noisy, stddev, n, me, np )
@@ -157,26 +155,25 @@ subroutine add_noise( f_phantom, f_noisy, stddev, n, me, np )
    integer, intent(in)       :: me, np, n
 
    real(kind=8), allocatable :: fn(:,:), stddev_rand
-   integer                   :: i, j, k, l, nx, ny
+   integer                   :: k, l, p, nx, ny
 
-   nx = n/int(sqrt( real(np) ))
-   ny = n/int(sqrt( real(np) ))
+   p = int(sqrt( real(np) ))
+   nx = n/p
+   ny = n/p
 
    allocate(fn(nx,ny))
 
-
    call RANDOM_SEED
    call RANDOM_NUMBER(fn)
+
    fn = (fn - 0.5)
    stddev_rand = sqrt(sum( fn**2)/(nx*ny))
 
-   do i = 1, nx
-      do j = 1, ny
-         k = (me-1)*nx + i
-         l = (me-1)*ny + j
-         f_noisy(k,l)[me] = f_phantom(k,l)[me] + (stddev/stddev_rand)*fn(i,j)
-      end do
-   end do
+
+   k = nx*(mod(me-1, p))
+   l = ny*( (me-1)/p)
+   f_noisy(k+1 : k+nx, l + 1 : l+ny) = f_phantom(k+1 : k+nx, l + 1 : l+ny) + fn( 1:nx, 1:ny)
+
 end subroutine add_noise
 
 
