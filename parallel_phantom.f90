@@ -17,12 +17,11 @@ program phantom
 ! Input parameters that define the problem:
    character(len=80)           :: arg, value
 
-   integer                     :: n, nx, ny, p, k, l, i
+   integer                     :: n, nx, ny, p, x_start, y_start
+   integer                     :: i, k, l
    real(kind=8)                :: stddev, err, lambda
    real(kind=8), allocatable   :: f_phantom(:,:)[:], f_noisy(:,:)[:], f_filtered(:,:)[:]
    real(kind = 8) :: f_test(512,512)
-
-
 
 ! For timing:
    integer                     :: t0, t1, tb, te, clock_rate, clock_max
@@ -32,11 +31,7 @@ program phantom
 
    me = this_image()
    np = num_images()
-
-   if (me == 1) then
-      write(*,*) 
-      call system_clock ( t0, clock_rate, clock_max )
-   end if
+   p = int(sqrt( real(np) ))
 
 ! Defaults:
    n = 512
@@ -61,7 +56,7 @@ program phantom
    end do
 
    ! Check if the square root of np is an integer
-   if  ( abs(sqrt(real(np)) - int(sqrt(real(np)))) > 1e-10) then
+   if ( abs(sqrt(real(np)) - p) > 1e-10)  then
       if(me == 1) then
          write(*,*) abs( sqrt(real(np))-int(sqrt(real(np))) )>1e-10
          write(*,*) 'Error: np must be a perfect square'
@@ -70,18 +65,29 @@ program phantom
    end if
 
    ! Check if the square root of np divides n
-   if ( mod(n, int(sqrt(real(np)))) /= 0) then
+   if ( mod(n, p) /= 0) then
       if(me == 1) then
          write(*,*) 'Error: n must be divisible by sqrt(np)'
       end if
       stop
    end if
-   
+
+   if (me == 1) then
+      write(*,*) 
+      call system_clock ( t0, clock_rate, clock_max )
+   end if
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+   ! Input is set up correctly, we now start with the actual program.
+
    ! Block sizes
-   nx = n/int(sqrt( real(np) ))
-   ny = n/int(sqrt( real(np) ))
+   nx = n/p
+   ny = n/p
 
-
+   ! Starting places
+   x_start = nx*(mod(me-1, p))
+   y_start = ny*((me-1)/p)
+   
    ! Allocate the memory for all arrays
    allocate( f_phantom(n,n)[*], f_noisy(n,n)[*], f_filtered(n,n)[*] )
 
@@ -97,20 +103,21 @@ program phantom
    sync all
 
 ! Distribute the image
-   call distribute_image( f_phantom, n, me, np )
+   call distribute_image( f_phantom, x_start, y_start, nx, ny, me)
    sync all
 
 ! Add noise
-   call add_noise( f_phantom, f_noisy, stddev, n, me, np )
+   call add_noise( f_phantom, f_noisy, stddev, x_start, y_start, nx, ny )
    sync all
+
 
 ! Reassemble the image in the main processor
    if (me == 1) then
-      do p = 2, np
-         k = nx*(mod(p-1, int(sqrt( real(np) ))))
-         l = ny*( (p-1)/int(sqrt( real(np) )))
+      do i = 2, np
+         k = nx*(mod(i-1, p))
+         l = ny*((i-1)/p)
 
-         f_noisy(k+1 : k+nx, l + 1 : l+ny) = f_noisy(k+1 : k+nx, l + 1 : l+ny)[p]
+         f_noisy(k+1 : k+nx, l + 1 : l+ny) = f_noisy(k+1 : k+nx, l + 1 : l+ny)[i]
       end do
    end if
    sync all
@@ -127,39 +134,25 @@ program phantom
 
 contains
 
-subroutine distribute_image( f_phantom, n, me, np)
+subroutine distribute_image( f_phantom, x_start, y_start, nx, ny, me)
 
    real(kind=8)              :: f_phantom(:,:)[*]
-   integer, intent(in)       :: n, me, np
+   integer, intent(in)       ::  x_start, y_start, nx, ny, me
 
-   integer :: i, j, k, l, m, p, nx, ny
+   integer :: i
 
-   p = int(sqrt( real(np) ))
-   nx = n/p
-   ny = n/p
 
-   if (me == 1) then
-      do m = 1, np
-         k = nx*(mod(m-1, p))
-         l = ny*( (m-1)/p)
+   f_phantom(x_start+1 : x_start+nx, y_start + 1 : y_start+ny)[me] = f_phantom(x_start+1 : x_start+nx, y_start + 1 : y_start+ny)[1]
 
-         f_phantom(k+1 : k+nx, l + 1 : l+ny)[m] = f_phantom(k+1 : k+nx, l + 1 : l+ny)[1]
-      end do
-   end if
 end subroutine distribute_image
 
-subroutine add_noise( f_phantom, f_noisy, stddev, n, me, np )
+subroutine add_noise( f_phantom, f_noisy, stddev, x_start, y_start, nx, ny )
 
    real(kind=8), intent(in)  :: f_phantom(:,:)[*], stddev
    real(kind=8), intent(out) :: f_noisy(:,:)[*]
-   integer, intent(in)       :: me, np, n
+   integer, intent(in)       :: x_start, y_start, nx, ny
 
    real(kind=8), allocatable :: fn(:,:), stddev_rand
-   integer                   :: k, l, p, nx, ny
-
-   p = int(sqrt( real(np) ))
-   nx = n/p
-   ny = n/p
 
    allocate(fn(nx,ny))
 
@@ -169,10 +162,7 @@ subroutine add_noise( f_phantom, f_noisy, stddev, n, me, np )
    fn = (fn - 0.5)
    stddev_rand = sqrt(sum( fn**2)/(nx*ny))
 
-
-   k = nx*(mod(me-1, p))
-   l = ny*( (me-1)/p)
-   f_noisy(k+1 : k+nx, l + 1 : l+ny) = f_phantom(k+1 : k+nx, l + 1 : l+ny) + fn( 1:nx, 1:ny)
+   f_noisy(x_start+1 : x_start+nx, y_start + 1 : y_start+ny) = f_phantom(x_start+1 : x_start+nx, y_start + 1 : y_start+ny) + fn( 1:nx, 1:ny)
 
 end subroutine add_noise
 
