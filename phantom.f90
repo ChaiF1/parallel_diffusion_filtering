@@ -178,7 +178,7 @@ function mv( v, lambda ) result(w)
    v_halo = 0.
    v_halo(1:nx,1:ny) = v                   ! Points in the interior
    v_halo(0,1:ny)    = v_halo(1,1:ny)      ! Neumann condition on the left
-   v_halo(nx+1,ny)   = v_halo(nx,ny)       ! Neumann condition on the right
+   v_halo(nx+1, 1:ny)   = v_halo(nx, 1:ny)       ! Neumann condition on the right
    v_halo(1:nx,0)    = v_halo(1:nx,1)      ! Neumann condition on the bottom
    v_halo(1:nx,ny+1) = v_halo(1:nx,ny)     ! Neumann condition on the top
 
