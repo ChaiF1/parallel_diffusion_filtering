@@ -37,7 +37,7 @@ program phantom
 ! Defaults:
    n = 512
    stddev = 0.5
-   lambda = 0.
+   lambda = 0.1
 
 ! Read parameters from command line:
    do i = 1, command_argument_count()
@@ -111,6 +111,14 @@ program phantom
    ! Reassemble the image in the main processor
    call gather_image(f_noisy, f_local, nx, ny, me, np, np_root)
 
+
+   ! Test the matrix-vector multiplication
+   call test_mv(lambda, me, np_root)
+
+   ! Test the inner product
+   call test_inproduct(me, np_root)
+
+
    f_local = cg(f_local, lambda, nx, ny, me, np_root)
 
    call gather_image(f_filtered, f_local, nx, ny, me, np, np_root)
@@ -153,13 +161,13 @@ subroutine add_noise( f_local, stddev, nx, ny )
 
    allocate(fn(nx,ny))
 
-   call RANDOM_SEED
+   call RANDOM_SEED()
    call RANDOM_NUMBER(fn)
 
    fn = (fn - 0.5)
    stddev_rand = sqrt(sum( fn**2)/(nx*ny))
 
-   f_local(:,:)[me] = f_local(:,:)[me] + fn
+   f_local(:,:)[me] = f_local(:,:)[me] + (stddev/stddev_rand)*fn
    sync all
 end subroutine add_noise
 
@@ -243,12 +251,11 @@ function cg( f_local, lambda, nx, ny, me, np_root ) result(f_local_filtered)
    implicit none
 
    real(kind=8), intent(in)    :: lambda
-   real(kind=8), intent(in)    :: f_local(:,:)[*]
    integer, intent(in)         :: nx, ny, me, np_root
+   real(kind=8)                :: f_local(:,:)[*]
    real(kind=8)                :: f_local_filtered(size(f_local,1),size(f_local,2))
 
    real(kind=8)                :: b(size(f_local,1),size(f_local,2))
-   real(kind=8)                :: x(size(f_local,1),size(f_local,2))
    real(kind=8)                :: r(size(f_local,1),size(f_local,2))
    real(kind=8), allocatable   :: p(:,:)[:]
    real(kind=8)                :: Ap(size(f_local,1),size(f_local,2))
@@ -268,15 +275,14 @@ function cg( f_local, lambda, nx, ny, me, np_root ) result(f_local_filtered)
    tol   = 1.e-8
 
    b = lambda*f_local(:,:)[me]
-
    r = b - mv( f_local, lambda, nx, ny, me, np_root )
 
    p(:,:)[me] = r
 
    sync all
 
-   Ap = mv( p, lambda, nx, ny, me, np_root )
 
+   Ap = mv( p, lambda, nx, ny, me, np_root )
    gamma = dot_butterfly_2d(r,r)
    normr = sqrt( gamma )
    normb = sqrt( dot_butterfly_2d(b,b) )
@@ -287,7 +293,7 @@ function cg( f_local, lambda, nx, ny, me, np_root ) result(f_local_filtered)
       xi = dot_butterfly_2d(p(:,:)[me],Ap)
       alpha = gamma/xi
 
-      x = x + alpha*p(:,:)[me]
+      f_local(:,:)[me] = f_local(:,:)[me] + alpha*p(:,:)[me]
       r = r - alpha*Ap
 
       beta  = 1/gamma
@@ -300,9 +306,11 @@ function cg( f_local, lambda, nx, ny, me, np_root ) result(f_local_filtered)
       it = it+1
    end do
 
-   f_local_filtered = x
-   write(*,'(a,i4,1x,a,e9.3)') 'CG terminated after ',it, &
-           'iterations with relative residual norm ', normr/normb
+   f_local_filtered = f_local(:,:)[me]
+   if (me == 1) then
+      write(*,'(a,i4,1x,a,e9.3)') 'CG terminated after ',it, &
+              'iterations with relative residual norm ', normr/normb
+   end if
 
    deallocate(p)
 end function cg
@@ -315,13 +323,11 @@ function mv( v, lambda, nx, ny, me, np_root) result(w)
 
    real(kind=8), intent(in)    :: lambda
    real(kind=8), intent(in)    :: v(:,:)[*]
-   integer, intent(in)         :: np_root
+   integer, intent(in)         :: np_root, nx, ny, me
 
    real(kind=8)                :: w(size(v,1),size(v,2))
    real(kind=8)                :: v_halo(0:size(v,1)+1,0:size(v,2)+1)
-   integer                     :: nx, ny
    integer                     :: i, j
-   integer                     :: me, p
 
    ! Add extra row/column around the domain to account for boundary conditions
    ! or data on other processor. Note that these points are outside the domain.
@@ -333,35 +339,34 @@ function mv( v, lambda, nx, ny, me, np_root) result(w)
    v_halo(1 : nx, 1: ny) = v  ! Points in the interior
 
    ! If you are a left processor, set a left halo. Else, retreive the boundary from your neighbour
-   if (mod(me-1,p) == 0) then
+   if (mod(me-1,np_root) == 0) then
       v_halo(0,1:ny) = v_halo(1,1:ny)
-   else if (mod(me,p) /= 0) then
+   else if (mod(me-1,np_root) /= 0) then
       v_halo(0, 1:ny) = v(nx, 1:ny)[me - 1]
    end if
 
    ! If you are the right processor, set a right halo
-   if (mod(me,p) == 0) then
+   if (mod(me,np_root) == 0) then
       v_halo(nx+1 , 1:ny) = v_halo(nx,1:ny)
-   else if (mod(me,p) /= 0) then
+   else if (mod(me,np_root) /= 0) then
       v_halo(nx+1, 1:ny) = v(1, 1:ny)[me + 1]
    end if
 
    ! If you are the top processor, set a top halo
-   if (me > np - p) then
+   if (me > np - np_root) then
       v_halo(1:nx, ny+1) = v_halo(1:nx, ny)
-   else if (me <= np - p) then
-      v_halo(1: nx, ny+1 ) = v( 1: nx , 1)[me + p]
+   else if (me <= np - np_root) then
+      v_halo(1: nx, ny+1 ) = v( 1: nx , 1)[me + np_root]
    end if
 
    ! If you are the bottom processor, set a bottom halo
-   if (me <= p) then
+   if (me <= np_root) then
       v_halo(1:nx,0) = v_halo(1:nx,1)
-   else if (me > p) then
-      v_halo(1 : nx , 0) = v(1 :  nx , ny)[me - p]
+   else if (me > np_root) then
+      v_halo(1 : nx , 0) = v(1 :  nx , ny)[me - np_root]
    end if
 
    sync all
-
    ! Now we can just perform the stencil operation:
    w = lambda*v(:,:)[me]
    do j = 1, ny
@@ -371,6 +376,60 @@ function mv( v, lambda, nx, ny, me, np_root) result(w)
       end do
    end do
 end function mv
+
+subroutine test_mv(lambda, me, np_root)
+      integer, intent(in) :: me, np_root
+      real(kind = 8), intent(in) :: lambda
+      
+      real(kind = 8), allocatable :: test_array(:,:)[:]
+      real(kind = 8), allocatable :: result(:,:)
+
+
+      allocate(test_array(2,2)[*])
+      allocate(result(2,2))
+
+      test_array = 1.
+      result = mv(test_array, lambda, size(test_array,1), size(test_array,2), me, np_root)
+
+      ! Assert that the test array is now all zeroes
+       if (all(result /= lambda)) then
+             write(*,*) 'MV Test failed on', me
+            stop
+       end if
+end subroutine test_mv
+
+
+subroutine test_inproduct(me, np_root)
+   integer, intent(in) :: me, np_root
+   real(kind = 8), allocatable :: test_array2d(:,:)[:]
+   real(kind = 8) :: test_array1d(4)
+   real(kind = 8) :: s
+
+
+   test_array1d = 0.25
+
+   s = dot_butterfly(test_array1d, test_array1d)
+
+   if (s /= 1) then
+      write(*,*) '1D Inproduct test failed on', me
+      write(*,*) s
+      stop
+   end if
+
+   allocate(test_array2d(2,2)[*])
+   test_array2d = 0.5
+
+   s = dot_butterfly_2d(test_array2d, test_array2d)
+
+   if (s /= 4) then
+      write(*,*) '2D Inproduct test failed on', me
+      write(*,*) s
+
+      stop
+   end if
+
+end subroutine test_inproduct
+
 
 real(8) function dot_butterfly_2d(x,y)
    ! Flatten the 2D arrays and call the 1D butterfly reduction
@@ -439,25 +498,25 @@ end function dot_butterfly
 
 subroutine shepp_logan( f, n )
 
-!
-!    Larry Shepp, Ben Logan,
-!    The Fourier reconstruction of a head section,
-!    IEEE Transactions on Nuclear Science,
-!    Volume  NS-21, June 1974, pages 21-43.
-!
-!  Parameters:
-!
-!    Input, integer n, the number of points in each direction.
-!
-!    Output, real f(n,n), the image values.
-!
-!  Local parameters:
-!
-!    Local, integer CHOICE:
-!    1, use Archibald's (and Shepp and Logan's) level values;
-!    2, use Matlab's level values;
-!    3, use Matlab's enhanced contrast level values.
-!
+   !
+   !    Larry Shepp, Ben Logan,
+   !    The Fourier reconstruction of a head section,
+   !    IEEE Transactions on Nuclear Science,
+   !    Volume  NS-21, June 1974, pages 21-43.
+   !
+   !  Parameters:
+   !
+   !    Input, integer n, the number of points in each direction.
+   !
+   !    Output, real f(n,n), the image values.
+   !
+   !  Local parameters:
+   !
+   !    Local, integer CHOICE:
+   !    1, use Archibald's (and Shepp and Logan's) level values;
+   !    2, use Matlab's level values;
+   !    3, use Matlab's enhanced contrast level values.
+   !
 
    implicit none
 
