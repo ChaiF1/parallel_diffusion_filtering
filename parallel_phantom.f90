@@ -24,8 +24,10 @@ program phantom
    real(kind=8), allocatable   :: f_local(:,:)[:]
    real(kind = 8) :: f_test(512,512)
 
+   integer, dimension(3,3) :: matrix = reshape((/1, 2, 3, 4, 5, 6, 7, 8, 9/), (/3, 3/))
+
 ! For timing:
-   integer                     :: t0, t1, tb, te, clock_rate, clock_max
+   integer                     :: t0, t_gen, t_distr, t_noise, t_gather, t_comp, t1, clock_rate, clock_max
 
 ! For parallelizing the program
    integer :: np, me
@@ -92,12 +94,20 @@ program phantom
 
    allocate( f_local(nx,ny)[*] )
 
+
+   
+
+   ! if (me == 1) then
+   !    ! write the matrix in matrix form
+      
+   !    write(*,*) reshape(matrix, (/9/))
+   ! end if
 ! Generate phantom image
    if (me == 1) then
       call shepp_logan( f_phantom, n)
 
-      ! Timing for adding noise and filtering (part of the program that will be parallelised)
-      call system_clock ( tb, clock_rate, clock_max )
+      call system_clock(t_gen, clock_rate, clock_max )
+      write(*,'(a, e8.2)') 'Time for generating the phantom image: ',real(t_gen-t0)/real(clock_rate)
    end if 
 
    sync all
@@ -105,21 +115,43 @@ program phantom
 ! Distribute the image
    call distribute_image( f_phantom, f_local, nx, ny, me, np, np_root)
 
+   if (me == 1) then
+      call system_clock(t_distr, clock_rate, clock_max )
+      write(*,'(a, e8.2)') 'Time for distributing the image: ',real(t_distr-t_gen)/real(clock_rate)
+   end if
+
 ! Add noise
    call add_noise( f_local, stddev, nx, ny )
+
+   if (me == 1) then
+      call system_clock(t_noise, clock_rate, clock_max )
+      write(*,'(a, e8.2)') 'Time for adding noise: ',real(t_noise-t_distr)/real(clock_rate)
+   end if
+
 
    ! Reassemble the image in the main processor
    call gather_image(f_noisy, f_local, nx, ny, me, np, np_root)
 
+   if (me == 1) then
+      call system_clock(t_gather, clock_rate, clock_max )
+      write(*,'(a, e8.2)') 'Time for gathering the noisy image: ',real(t_gather-t_noise)/real(clock_rate)
+      write(*,*)
+   end if
+
 
    ! Test the matrix-vector multiplication
-   call test_mv(lambda, me, np_root)
+   ! call test_mv(lambda, me, np_root)
 
    ! Test the inner product
-   call test_inproduct(me, np_root)
+   ! call test_inproduct(me, np_root)
 
 
    f_local = cg(f_local, lambda, nx, ny, me, np_root)
+
+   if (me == 1) then
+      call system_clock(t_comp, clock_rate, clock_max )
+      write(*,'(a, e8.2)') 'Time for computation: ',real(t_comp-t_gather)/real(clock_rate)
+   end if
 
    call gather_image(f_filtered, f_local, nx, ny, me, np, np_root)
 
@@ -127,27 +159,35 @@ program phantom
    if (me == 1) then
       call gif_images(f_phantom, f_noisy, f_filtered)
       call system_clock ( t1, clock_rate, clock_max )
-      write(*,'(a,e8.2)') 'Time: ',real(t1-t0)/real(clock_rate)
+      write(*,'(a, e8.2)') 'Time for gathering and writing to file ',real(t1-t_comp)/real(clock_rate)
+      write(*,*)
+      write(*,'(a,e8.2)') 'Total Time: ',real(t1-t0)/real(clock_rate)
    end if
    
 ! Timing for adding noise and filtering (part of the program that will be parallelised)
-   call system_clock ( tb, clock_rate, clock_max )
+!   call system_clock ( tb, clock_rate, clock_max )
 
 contains
 
 subroutine distribute_image( f_phantom, f_local, nx, ny, me, np, np_root)
-   real(kind=8)              :: f_phantom(:,:), f_local(:,:)[*]
-   integer, intent(in)       ::  nx, ny, me, np, np_root
+   real(kind=8)                :: f_phantom(:,:), f_local(:,:)[*]
+   real(kind = 8), allocatable :: f_flattened(:)[:]
+   integer, intent(in)         ::  nx, ny, me, np, np_root
 
    integer :: i, x_start, y_start
 
+   allocate(f_flattened(nx*ny)[*])
    if (me == 1) then
       do i = 1, np
          x_start = nx*(mod(i-1, np_root))
          y_start = ny*((i-1)/np_root)
-         f_local(:,:)[i] = f_phantom(x_start+1 : x_start+nx, y_start + 1 : y_start+ny)
+         f_flattened(:)[i] = reshape(f_phantom(x_start+1 : x_start+nx, y_start + 1 : y_start+ny), [nx*ny])
+         !f_local(:,:)[i] = f_phantom(x_start+1 : x_start+nx, y_start + 1 : y_start+ny)
       end do
    end if
+   sync all
+
+   f_local(:,:)[me] = reshape(f_flattened(:)[me], [nx,ny])
    sync all
 end subroutine distribute_image
 
@@ -172,16 +212,23 @@ subroutine add_noise( f_local, stddev, nx, ny )
 end subroutine add_noise
 
 subroutine gather_image(gather_array, local_array, nx, ny, me, np, np_root )
-   real(kind=8)             :: gather_array(:,:), local_array(:,:)[*]
-   integer, intent(in)      :: nx, ny, me, np, np_root
-   integer                  :: i, k, l
+   real(kind=8)              :: gather_array(:,:), local_array(:,:)[*] 
+   real(kind=8), allocatable :: local_flattened(:)[:]
+   integer, intent(in)       :: nx, ny, me, np, np_root
+   integer                   :: i, k, l
+
+   allocate(local_flattened(nx*ny)[*])
+
+   local_flattened(:)[me] = reshape(local_array(:,:)[me], [nx*ny])
 
    if (me == 1) then
       do i = 1, np
          k = nx*(mod(i-1, np_root))
          l = ny*((i-1)/np_root)
 
-         gather_array(k+1 : k+nx, l + 1 : l+ny) = local_array(:, :)[i]
+         gather_array(k+1 : k+nx, l + 1 : l+ny) = reshape(local_flattened(:)[i], [nx,ny])
+
+         !gather_array(k+1 : k+nx, l + 1 : l+ny) = local_array(:, :)[i]
       end do
    end if
    sync all
@@ -267,17 +314,17 @@ function cg( f_local, lambda, nx, ny, me, np_root ) result(f_local_filtered)
    allocate(p(nx,ny)[*])
 
    if ( lambda == 0. ) then
-      f_local_filtered = f_local(:,:)[me]
+      f_local_filtered = f_local(:,:)
       return
    end if
 
    maxit = 100
    tol   = 1.e-8
 
-   b = lambda*f_local(:,:)[me]
+   b = lambda*f_local(:,:)
    r = b - mv( f_local, lambda, nx, ny, me, np_root )
 
-   p(:,:)[me] = r
+   p(:,:) = r
 
    sync all
 
@@ -290,26 +337,26 @@ function cg( f_local, lambda, nx, ny, me, np_root ) result(f_local_filtered)
    it = 0
    do while ( normr/normb > tol .and. it < maxit )
 
-      xi = dot_butterfly_2d(p(:,:)[me],Ap)
+      xi = dot_butterfly_2d(p(:,:),Ap)
       alpha = gamma/xi
 
-      f_local(:,:)[me] = f_local(:,:)[me] + alpha*p(:,:)[me]
+      f_local(:,:) = f_local(:,:) + alpha*p(:,:)
       r = r - alpha*Ap
 
       beta  = 1/gamma
       gamma = dot_butterfly_2d(r,r)
       normr = sqrt(gamma)
       beta  = gamma*beta
-      p(:,:)[me] = r + beta*p(:,:)[me]
+      p(:,:) = r + beta*p(:,:)
       Ap    = mv( p, lambda, nx, ny, me, np_root )
 
       it = it+1
    end do
 
-   f_local_filtered = f_local(:,:)[me]
+   f_local_filtered = f_local(:,:)
    if (me == 1) then
       write(*,'(a,i4,1x,a,e9.3)') 'CG terminated after ',it, &
-              'iterations with relative residual norm ', normr/normb
+              'iterations with relative       residual norm ', normr/normb
    end if
 
    deallocate(p)
@@ -325,10 +372,10 @@ function mv( v, lambda, nx, ny, me, np_root) result(w)
    real(kind=8), intent(in)    :: v(:,:)[*]
    integer, intent(in)         :: np_root, nx, ny, me
 
+   real(kind=8), allocatable   ::  v_flattened(:)[:]
    real(kind=8)                :: w(size(v,1),size(v,2))
    real(kind=8)                :: v_halo(0:size(v,1)+1,0:size(v,2)+1)
    integer                     :: i, j
-
    ! Add extra row/column around the domain to account for boundary conditions
    ! or data on other processor. Note that these points are outside the domain.
    ! They can be eliminated by the homogeneous Neumann condition. This condition
@@ -338,37 +385,60 @@ function mv( v, lambda, nx, ny, me, np_root) result(w)
    v_halo = 0.
    v_halo(1 : nx, 1: ny) = v  ! Points in the interior
 
+
+   ! Because Fortran is slow with using 2D matrices, we will cast our coarray to a 1D array
+   allocate(v_flattened(nx*ny)[*])
+   v_flattened = 0.
+   v_flattened = reshape(v, [nx*ny])
+
+
+
    ! If you are a left processor, set a left halo. Else, retreive the boundary from your neighbour
+   ! As fortran uses column major ordering the left column is given by v(1:ny)
+   ! And the right column is given by the last ny elements
+
    if (mod(me-1,np_root) == 0) then
       v_halo(0,1:ny) = v_halo(1,1:ny)
    else if (mod(me-1,np_root) /= 0) then
-      v_halo(0, 1:ny) = v(nx, 1:ny)[me - 1]
+      ! Use v_flattened to retreive the data from the left neighbouring processor
+      v_halo(0, 1:ny) = v_flattened(ny:nx*ny:ny)[me-1]
+      !v_halo(0, 1:ny) = v(nx, 1:ny)[me - 1]
    end if
+   sync all
 
-   ! If you are the right processor, set a right halo
+   ! If you are the right processor, set a right halo. Otherwise, retrieve elements from your right neighbour.
    if (mod(me,np_root) == 0) then
       v_halo(nx+1 , 1:ny) = v_halo(nx,1:ny)
-   else if (mod(me,np_root) /= 0) then
-      v_halo(nx+1, 1:ny) = v(1, 1:ny)[me + 1]
+   else if (mod(me,np_root) /= 0) then      
+      v_halo(nx+1, 1:ny) = v_flattened(1 : (nx-1)*ny + 1 : ny)[me+1]
+      !v_halo(nx+1, 1:ny) = v(1, 1:ny)[me + 1]
    end if
 
-   ! If you are the top processor, set a top halo
+   sync all
+
+   ! If you are the top processor, set a top halo. Otherwise, retrieves elements from the array above you.
+   ! As Fortran uses column major ordering, the top row is given by (i-1)*ny+1
+   ! And the bottom row is given by i*ny
    if (me > np - np_root) then
       v_halo(1:nx, ny+1) = v_halo(1:nx, ny)
-   else if (me <= np - np_root) then
-      v_halo(1: nx, ny+1 ) = v( 1: nx , 1)[me + np_root]
+   else if (me <= np - np_root) then      
+      v_halo(1 : nx, ny+1) = v_flattened(1 : ny )[me + np_root]
+      !v_halo(1: nx, ny+1 ) = v( 1: nx , 1)[me + np_root]
    end if
 
-   ! If you are the bottom processor, set a bottom halo
+   sync all
+
+   ! If you are the bottom processor, set a bottom halo. Otherwise, retreive elements from the array below you.
    if (me <= np_root) then
       v_halo(1:nx,0) = v_halo(1:nx,1)
-   else if (me > np_root) then
+   else if (me > np_root) then      
+      v_halo( 1: nx, 0 ) = v_flattened(size(v_flattened) - ny + 1 :)[me - np_root]
       v_halo(1 : nx , 0) = v(1 :  nx , ny)[me - np_root]
    end if
 
    sync all
    ! Now we can just perform the stencil operation:
-   w = lambda*v(:,:)[me]
+   w = lambda*v(:,:)
    do j = 1, ny
       do i = 1, nx
          w(i,j) = w(i,j) &
