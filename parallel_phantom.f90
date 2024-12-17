@@ -17,7 +17,7 @@ program phantom
 ! Input parameters that define the problem:
    character(len=80)           :: arg, value
 
-   integer                     :: n, nx, ny, np_root
+   integer                     :: n, nx, ny, np_row, np_col
    integer                     :: i, k, l
    real(kind=8)                :: stddev, err, lambda
    real(kind=8), allocatable   :: f_phantom(:,:), f_noisy(:,:), f_filtered(:,:)
@@ -37,49 +37,61 @@ program phantom
 
    me = this_image()
    np = num_images()
-   np_root = int(sqrt( real(np) ))
 
-! Defaults:
+   ! Defaults:
    n = 512
    stddev = 0.5
    lambda = 0.1
 
-! Read parameters from command line:
+   ! amount of processors in a row and in a column respectively
+   np_row = 4
+   np_col = 1
+
+   ! Read parameters from command line:
    do i = 1, command_argument_count()
       call get_command_argument(i, arg)
 
       select case(arg)
-      case('-npx')
-         call get_command_argument(i+1, value)
-         read(value,'(i6)') n
-      case('-sigma')
-         call get_command_argument(i+1, value)
-         read(value,'(e9.4)') stddev
-      case('-lambda')
-         call get_command_argument(i+1, value)
-         read(value,'(e9.4)') lambda
+         case('-npx')
+            call get_command_argument(i+1, value)
+            read(value,'(i6)') n
+         case('-sigma')
+            call get_command_argument(i+1, value)
+            read(value,'(e9.4)') stddev
+         case('-lambda')
+            call get_command_argument(i+1, value)
+            read(value,'(e9.4)') lambda
+         ! case('-debug')
+         !    call get_command_argument(i+1, value)
+         !    read(value, '(l1)') debug
+         ! case ('-np_row')
+         !    call get_command_argument(i+1, value)
+         !    read(value, '(i6') np_row
+         ! case ('-np_col')
+         !    call get_command_argument(i+1, value)
+         !    read(value, '(i6') np_col
       end select
    end do
 
-   ! Check if the square root of np is an integer
-   if ( abs(sqrt(real(np)) - np_root) > 1e-10)  then
+   ! Check if np_row times np_col is equal to np
+   if ( abs(np - np_row*np_col) > 1e-10)  then
       if(me == 1) then
-         write(*,*) abs( sqrt(real(np))-int(sqrt(real(np))) )>1e-10
-         write(*,*) 'Error: np must be a perfect square'
+         write(*,*) 'Error: np_row*np_col must be equal to np'
       end if
       stop
    end if
 
-   ! Check if the square root of np divides n
-   if ( mod(n, np_root) /= 0) then
+   ! Check if number of pixels is neatly divisible by the amount of processors
+   if ( mod(n, np) /= 0) then
       if(me == 1) then
-         write(*,*) 'Error: n must be divisible by sqrt(np)'
-         ! Add a small amount of pixels to make n divisible by np_root
-         write (*,*) "Added ", np_root - mod(n, np_root), " pixels to n"
+         write(*,*) 'Error: n must be divisible by np'
+         ! Add a small amount of pixels to make n divisible by np
+         write (*,*) "Added ", np - mod(n, np), " pixels to n"
       end if
-      n = n + np_root - mod(n, np_root)
+      n = n + np - mod(n, np)
    end if
 
+   ! Start clock on the program
    if (me == 1) then
       write(*,*) 
       call system_clock ( t0, clock_rate, clock_max )
@@ -89,8 +101,8 @@ program phantom
    ! Input is set up correctly, we now start with the actual program.
 
    ! Block sizes
-   nx = n/np_root
-   ny = n/np_root
+   nx = n/np_row
+   ny = n/np_col
    
    ! Allocate the memory for all arrays
    if( me == 1) then
@@ -111,8 +123,8 @@ program phantom
 
    sync all
 
-! Distribute the image
-   call distribute_image( f_phantom, f_local, nx, ny, me, np, np_root)
+   ! Distribute the image
+   call distribute_image( f_phantom, f_local, me, np_row, np_col)
 
    if (me == 1) then
       call system_clock(t_distr, clock_rate, clock_max )
@@ -121,9 +133,10 @@ program phantom
       end if
    end if
 
-! Add noise
+   ! Add noise
    call add_noise( f_local, stddev, nx, ny )
 
+   ! Debug timing for noise adding
    if (me == 1) then
       call system_clock(t_noise, clock_rate, clock_max )
       if (debug) then
@@ -131,10 +144,10 @@ program phantom
       end if
    end if
 
-
    ! Reassemble the image in the main processor
-   call gather_image(f_noisy, f_local, nx, ny, me, np, np_root)
+   call gather_image(f_noisy, f_local, me, np_row, np_col)
 
+   ! Debugging timing for gathering image
    if (me == 1) then
       call system_clock(t_gather, clock_rate, clock_max )
       if (debug) then
@@ -143,8 +156,9 @@ program phantom
       end if
    end if
 
-   f_local = cg(f_local, lambda, nx, ny, me, np_root)
+   f_local = cg(f_local, lambda, me, np_row, np_col)
 
+   ! Debugging timing for conjugate gradient
    if (me == 1) then
       call system_clock(t_comp, clock_rate, clock_max )
       if (debug) then
@@ -152,9 +166,11 @@ program phantom
       end if
    end if
 
-   call gather_image(f_filtered, f_local, nx, ny, me, np, np_root)
+   call gather_image(f_filtered, f_local, me, np_row, np_col)
 
-! Write the image to file
+   ! Write the image to file
+   ! If debug is on, report timing on gathering the image
+   ! Always report the total time of the program
    if (me == 1) then
       call gif_images(f_phantom, f_noisy, f_filtered)
       call system_clock ( t1, clock_rate, clock_max )
@@ -165,27 +181,31 @@ program phantom
       WRITE(10, '(A1, E15.7, A1, I0, A1, I0)') ',',  real(t1-t0)/real(clock_rate), ',', np, ',', n
    end if
 
+   ! Close the output file
    CLOSE(10)
-   
-! Timing for adding noise and filtering (part of the program that will be parallelised)
-!   call system_clock ( tb, clock_rate, clock_max )
 
 contains
 
-subroutine distribute_image( f_phantom, f_local, nx, ny, me, np, np_root)
+subroutine distribute_image( f_phantom, f_local, me, np_row, np_col)
    real(kind=8)                :: f_phantom(:,:), f_local(:,:)[*]
    real(kind = 8), allocatable :: f_flattened(:)[:]
-   integer, intent(in)         ::  nx, ny, me, np, np_root
+   integer, intent(in)         ::  me, np_row, np_col
 
-   integer :: i, x_start, y_start
+   integer :: i, x_start, y_start, nx, ny
+
+   nx = size(f_local,1)
+   ny = size(f_local,2)
 
    allocate(f_flattened(nx*ny)[*])
    if (me == 1) then
-      do i = 1, np
-         x_start = nx*(mod(i-1, np_root))
-         y_start = ny*((i-1)/np_root)
+      do i = 1, np_row*np_col
+         ! Calculate the starting position of the left lowest pixel of the starting array according to x_start = nx * (i-1) mod np_row
+         x_start = nx*(mod(i-1, np_row))
+         ! Calculate the starting y position according to y_start = ny * floor((i-1)/np_col)
+         y_start = ny*((i-1)/np_row)
+
+         ! Fortran starts indexing at 1, so add 1 to the starting index.
          f_flattened(:)[i] = reshape(f_phantom(x_start+1 : x_start+nx, y_start + 1 : y_start+ny), [nx*ny])
-         !f_local(:,:)[i] = f_phantom(x_start+1 : x_start+nx, y_start + 1 : y_start+ny)
       end do
    end if
    sync all
@@ -214,23 +234,31 @@ subroutine add_noise( f_local, stddev, nx, ny )
    sync all
 end subroutine add_noise
 
-subroutine gather_image(gather_array, local_array, nx, ny, me, np, np_root )
+subroutine gather_image(gather_array, local_array, me, np_row, np_col )
    real(kind=8)              :: gather_array(:,:), local_array(:,:)[*] 
    real(kind=8), allocatable :: local_flattened(:)[:]
-   integer, intent(in)       :: nx, ny, me, np, np_root
-   integer                   :: i, k, l
+   integer, intent(in)       :: me, np_row, np_col
+   integer                   :: i, x_start, y_start, nx, ny
 
+   ! Setting up some dummy variables.
+   nx = size(local_array,1)
+   ny = size(local_array,2)
+
+
+   ! Setup a flattened version of the coarray due to 2D coarrays being very slow.
    allocate(local_flattened(nx*ny)[*])
    local_flattened(:)[me] = reshape(local_array(:,:)[me], [nx*ny])
 
+
    if (me == 1) then
-      do i = 1, np
-         k = nx*(mod(i-1, np_root))
-         l = ny*((i-1)/np_root)
+      do i = 1, np_row*np_col
+         ! Calculate the starting position of the left lowest pixel of the starting array according to x_start = nx * (i-1) mod np_row
+         x_start = nx*(mod(i-1, np_row))
+         ! Calculate the starting y position according to y_start = ny * floor((i-1)/np_col)
+         y_start = ny*((i-1)/np_row)
 
-         gather_array(k+1 : k+nx, l + 1 : l+ny) = reshape(local_flattened(:)[i], [nx,ny])
-
-         !gather_array(k+1 : k+nx, l + 1 : l+ny) = local_array(:, :)[i]
+         ! Fortran starts indexing at 1, so add 1 to the starting index.
+         gather_array(x_start+1 : x_start+nx, y_start + 1 : y_start+ny) = reshape(local_flattened(:)[i], [nx,ny])
       end do
    end if
    sync all
@@ -292,14 +320,14 @@ subroutine gif_images( model_image, noisy_image, filtered_image )
    call write_animated_gif( gif_name, gif_image, map )
 end subroutine gif_images
 
-function cg( f_local, lambda, nx, ny, me, np_root ) result(f_local_filtered)
+function cg( f_local, lambda, me, np_row, np_col ) result(f_local_filtered)
    !
-   ! CG algorithm 
+   ! Conjugate gradient algorithm with parallel MV products and inproducts
    !
    implicit none
 
    real(kind=8), intent(in)    :: lambda
-   integer, intent(in)         :: nx, ny, me, np_root
+   integer, intent(in)         :: me, np_row, np_col
    real(kind=8)                :: f_local(:,:)[*]
    real(kind=8)                :: f_local_filtered(size(f_local,1),size(f_local,2))
 
@@ -309,38 +337,39 @@ function cg( f_local, lambda, nx, ny, me, np_root ) result(f_local_filtered)
    real(kind=8)                :: Ap(size(f_local,1),size(f_local,2))
    real(kind=8)                :: alpha, beta, gamma, xi
    real(kind=8)                :: tol, normr, normb
-   integer                     :: it, maxit
+   integer                     :: it, maxit, nx, ny
+
+
+   nx = size(f_local,1)
+   ny = size(f_local,2)
 
    allocate(p(nx,ny)[*])
 
 
+   ! If lambda = 0 then no filtering is applied
    if ( lambda == 0. ) then
       f_local_filtered = f_local(:,:)
       return
    end if
 
+   ! Maximum amount of allowed tolerance for relative residual.
+   ! Stop once the relative residual is smaller than tol or the amount of iterations is bigger than maxit.
+
    maxit = 100
    tol   = 1.e-8
 
+   ! First steps of the algorithm
    b = lambda*f_local(:,:)
-
-
-
-   r = b - mv( f_local, lambda, nx, ny, me, np_root )
-
+   r = b - mv( f_local, lambda, me, np_row, np_col )
 
    p(:,:) = r
-
    sync all
-
-
-   Ap = mv( p, lambda, nx, ny, me, np_root )
-
+   Ap = mv( p, lambda, me, np_row, np_col )
    gamma = dot_butterfly_2d(r,r)
-
    normr = sqrt( gamma )
    normb = sqrt( dot_butterfly_2d(b,b) )
 
+   ! Start main iteration loop of CG
    it = 0
    do while ( normr/normb > tol .and. it < maxit )
 
@@ -355,7 +384,7 @@ function cg( f_local, lambda, nx, ny, me, np_root ) result(f_local_filtered)
       normr = sqrt(gamma)
       beta  = gamma*beta
       p(:,:) = r + beta*p(:,:)
-      Ap    = mv( p, lambda, nx, ny, me, np_root )
+      Ap    = mv( p, lambda, me, np_row, np_col)
 
       it = it+1
    end do
@@ -368,7 +397,7 @@ function cg( f_local, lambda, nx, ny, me, np_root ) result(f_local_filtered)
    deallocate(p)
 end function cg
 
-function mv( v, lambda, nx, ny, me, np_root) result(w)
+function mv( v, lambda, me, np_row, np_col) result(w)
    ! Matrix vector multiplication: w = lambda v + A v
    ! in which A represents -Laplacian with Neumann boundary conditions
    !
@@ -376,17 +405,20 @@ function mv( v, lambda, nx, ny, me, np_root) result(w)
 
    real(kind=8), intent(in)    :: lambda
    real(kind=8), intent(in)    :: v(:,:)[*]
-   integer, intent(in)         :: np_root, nx, ny, me
+   integer, intent(in)         :: np_row, np_col, me
 
-   real(kind=8), allocatable   ::  v_flattened(:)[:]
+   real(kind=8), allocatable   :: v_flattened(:)[:]
    real(kind=8)                :: w(size(v,1),size(v,2))
    real(kind=8)                :: v_halo(0:size(v,1)+1,0:size(v,2)+1)
-   integer                     :: i, j
+   integer                     :: i, j, nx, ny
    ! Add extra row/column around the domain to account for boundary conditions
    ! or data on other processor. Note that these points are outside the domain.
    ! They can be eliminated by the homogeneous Neumann condition. This condition
    ! says that the points on a row/column outside the boundary are equal to the 
    ! neighbouring points on the row/column inside the boundary.
+
+   nx = size(v,1)
+   ny = size(v,2)
 
    v_halo = 0.
    v_halo(1 : nx, 1: ny) = v  ! Points in the interior
@@ -397,52 +429,58 @@ function mv( v, lambda, nx, ny, me, np_root) result(w)
    v_flattened = 0.
    v_flattened = reshape(v, [nx*ny])
 
-
-
-   ! If you are a left processor, set a left halo. Else, retreive the boundary from your neighbour
-   ! As fortran uses column major ordering the left column is given by v(1:ny)
-   ! And the right column is given by the last ny elements
-
-   if (mod(me-1,np_root) == 0) then
+   ! Set the neumann boundary conditions
+   ! Left boundary
+   if (mod(me-1, np_row) == 0) then
+      ! Set imaginary boundary if you have no left neighbour
       v_halo(0,1:ny) = v_halo(1,1:ny)
-   else if (mod(me-1,np_root) /= 0) then
-      ! Use v_flattened to retreive the data from the left neighbouring processor
-      v_halo(0, 1:ny) = v_flattened(ny:nx*ny:ny)[me-1]
-      !v_halo(0, 1:ny) = v(nx, 1:ny)[me - 1]
-   end if
-   sync all
-
-   ! If you are the right processor, set a right halo. Otherwise, retrieve elements from your right neighbour.
-   if (mod(me,np_root) == 0) then
-      v_halo(nx+1 , 1:ny) = v_halo(nx,1:ny)
-   else if (mod(me,np_root) /= 0) then      
-      v_halo(nx+1, 1:ny) = v_flattened(1 : (nx-1)*ny + 1 : ny)[me+1]
-      !v_halo(nx+1, 1:ny) = v(1, 1:ny)[me + 1]
    end if
 
-   sync all
+   ! Right boundary
+   if (mod(me, np_row) == 0) then
+      v_halo(nx+1, 1:ny) = v_halo(nx,1:ny)
+   end if
 
-   ! If you are the top processor, set a top halo. Otherwise, retrieves elements from the array above you.
-   ! As Fortran uses column major ordering, the top row is given by (i-1)*ny+1
-   ! And the bottom row is given by i*ny
-   if (me > np - np_root) then
+   ! Top boundary
+   if (me > np_row*np_col - np_row) then
       v_halo(1:nx, ny+1) = v_halo(1:nx, ny)
-   else if (me <= np - np_root) then      
-      v_halo(1 : nx, ny+1) = v_flattened(1 : ny )[me + np_root]
-      !v_halo(1: nx, ny+1 ) = v( 1: nx , 1)[me + np_root]
    end if
-
-   sync all
-
-   ! If you are the bottom processor, set a bottom halo. Otherwise, retreive elements from the array below you.
-   if (me <= np_root) then
+   
+   ! Bottom boundary
+   if (me <= np_row) then
       v_halo(1:nx,0) = v_halo(1:nx,1)
-   else if (me > np_root) then      
-      v_halo( 1: nx, 0 ) = v_flattened(size(v_flattened) - ny + 1 :)[me - np_root]
-      v_halo(1 : nx , 0) = v(1 :  nx , ny)[me - np_root]
+   end if 
+   sync all
+
+   ! Go across each processor and add a virtual boundary or retreive data from a neighbouring processor.
+   ! Left boundary is given by v_flattened(1 : (nx-1)*ny + 1 : nx)
+   ! Right boundary is given by v_flattened(nx:nx*ny:nx)
+   ! Top boundary is given by v_flattened(size(v_flattened) - nx + 1 :)
+   ! Bottom boundary is given by v_flattened(1 : nx )
+
+   ! set LEFT boundary
+   if (mod(me-1, np_row) /= 0) then
+      v_halo(0, 1:ny) = v_flattened(nx:nx*ny:nx)[me-1]
    end if
 
+
+   ! set RIGHT boundary
+   if (mod(me, np_row) /= 0) then      
+      v_halo(nx+1, 1:ny) = v_flattened(1 : (nx-1)*ny + 1 : nx)[me+1]
+   end if
+   
+   ! set TOP boundary
+      ! Remember, np_row*np_col = number of processors
+   if (me <= np_row*np_col - np_row) then
+      v_halo(1 : nx, ny+1) = v_flattened(1 : nx )[me + np_row]
+   end if
+
+   ! set BOTTOM boundary
+   if (me > np_row) then
+      v_halo( 1: nx, 0 ) = v_flattened(size(v_flattened) - nx + 1 :)[me - np_row]
+   end if
    sync all
+
    ! Now we can just perform the stencil operation:
    w = lambda*v(:,:)
    do j = 1, ny
@@ -452,60 +490,6 @@ function mv( v, lambda, nx, ny, me, np_root) result(w)
       end do
    end do
 end function mv
-
-subroutine test_mv(lambda, me, np_root)
-      integer, intent(in) :: me, np_root
-      real(kind = 8), intent(in) :: lambda
-      
-      real(kind = 8), allocatable :: test_array(:,:)[:]
-      real(kind = 8), allocatable :: result(:,:)
-
-
-      allocate(test_array(2,2)[*])
-      allocate(result(2,2))
-
-      test_array = 1.
-      result = mv(test_array, lambda, size(test_array,1), size(test_array,2), me, np_root)
-
-      ! Assert that the test array is now all zeroes
-       if (all(result /= lambda)) then
-             write(*,*) 'MV Test failed on', me
-            stop
-       end if
-end subroutine test_mv
-
-
-subroutine test_inproduct(me, np_root)
-   integer, intent(in) :: me, np_root
-   real(kind = 8), allocatable :: test_array2d(:,:)[:]
-   real(kind = 8) :: test_array1d(4)
-   real(kind = 8) :: s
-
-
-   test_array1d = 0.25
-
-   s = dot_butterfly(test_array1d, test_array1d)
-
-   if (s /= 1) then
-      write(*,*) '1D Inproduct test failed on', me
-      write(*,*) s
-      stop
-   end if
-
-   allocate(test_array2d(2,2)[*])
-   test_array2d = 0.5
-
-   s = dot_butterfly_2d(test_array2d, test_array2d)
-
-   if (s /= 4) then
-      write(*,*) '2D Inproduct test failed on', me
-      write(*,*) s
-
-      stop
-   end if
-
-end subroutine test_inproduct
-
 
 real(8) function dot_butterfly_2d(x,y)
    ! Flatten the 2D arrays and call the 1D butterfly reduction

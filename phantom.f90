@@ -14,6 +14,9 @@ program phantom
 ! For timing:
       integer                     :: t0, t_gen, t_noise, t_comp, t1, clock_rate, clock_max
 
+   ! Debugging
+   logical :: debug = .false.
+
    write(*,*) 
    call system_clock ( t0, clock_rate, clock_max )
 
@@ -48,8 +51,10 @@ program phantom
    call shepp_logan( f_phantom, n )
 
    call system_clock(t_gen, clock_rate, clock_max )
-   write(*,'(a, e8.2)') 'Time for generating the phantom image: ',real(t_gen-t0)/real(clock_rate)
-   write(*,'(a, e8.2)') 'Time for distributing the image: ',0.
+   if (debug) then
+      write(*,'(a, e8.2)') 'Time for generating the phantom image: ',real(t_gen-t0)/real(clock_rate)
+      write(*,'(a, e8.2)') 'Time for distributing the image: ',0.
+   end if
 
 ! Add noise
    f_noisy = imnoise( f_phantom, stddev )
@@ -57,9 +62,11 @@ program phantom
 
    call system_clock(t_noise, clock_rate, clock_max )
 
-   write(*,'(a, e8.2)') 'Time for adding noise: ',real(t_noise-t_gen)/real(clock_rate)
-   write(*,'(a, e8.2)') 'Time for gathering the noisy image: ', 0.
-   write(*,*)   
+   if (debug) then
+      write(*,'(a, e8.2)') 'Time for adding noise: ',real(t_noise-t_gen)/real(clock_rate)
+      write(*,'(a, e8.2)') 'Time for gathering the noisy image: ', 0.
+      write(*,*)   
+   end if
 
 ! Filter the image
 
@@ -74,8 +81,16 @@ program phantom
    call gif_images( f_phantom, f_noisy, f_filtered )
    call system_clock ( t1, clock_rate, clock_max )
 
-   write(*,'(a, e8.2)') 'Time for gathering and writing to file ',real(t1-t_comp)/real(clock_rate)
-   write(*,*)
+   if (debug) then  
+      write(*,'(a, e8.2)') 'Time for gathering and writing to file ',real(t1-t_comp)/real(clock_rate)
+      write(*,*)
+   end if
+
+   !calculate the error of the filtered image
+   err = sqrt( sum( (f_filtered - f_phantom)**2 ) )/n
+   write(*,'(a,e8.3)') 'Error after filtering: ', err
+
+
    write(*,'(a,e8.2)') 'Total Time: ',real(t1-t0)/real(clock_rate)
 contains
 
@@ -98,8 +113,6 @@ function cg( f_noisy, lambda ) result(f_filtered)
    real(kind=8)                :: tol, normr, normb
    integer                     :: it, maxit
 
-   integer                     :: t_test1, t_test2, clock_rate, clock_max
-
    if ( lambda == 0. ) then
       f_filtered = f_noisy
       return
@@ -118,11 +131,7 @@ function cg( f_noisy, lambda ) result(f_filtered)
    
    Ap = mv( p, lambda )
 
-   call system_clock(t_test1, clock_rate, clock_max)
    gamma = inprod(r,r)
-   call system_clock (t_test2, clock_rate, clock_max)
-   write(*, '(5x, a, e8.2)') "Time for calculating inprod", real(t_test2-t_test1)/real(clock_rate)
-
    normr = sqrt( gamma )
    normb = sqrt( inprod(b,b) )
 
