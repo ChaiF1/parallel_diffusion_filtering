@@ -12,15 +12,15 @@ program phantom
    real(kind=8), allocatable   :: f_phantom(:,:), f_noisy(:,:), f_filtered(:,:)
 
 ! For timing:
-   integer                     :: t0, t1, tb, te, clock_rate, clock_max
+      integer                     :: t0, t_gen, t_noise, t_comp, t1, clock_rate, clock_max
 
    write(*,*) 
    call system_clock ( t0, clock_rate, clock_max )
 
 ! Defaults:
-   n = 512
-   stddev = 0.
-   lambda = 0.
+   n = 5096
+   stddev = 0.5
+   lambda = 0.1
 
 ! Read parameters from command line:
    do i = 1, command_argument_count()
@@ -42,32 +42,41 @@ program phantom
    allocate( f_phantom(n,n), f_noisy(n,n), f_filtered(n,n) )
 
 ! Generate phantom image
+   write(*,*) 
+   call system_clock ( t0, clock_rate, clock_max )
+
    call shepp_logan( f_phantom, n )
 
-! Timing for adding noise and filtering (part of the program that will be parallelised)
-   call system_clock ( tb, clock_rate, clock_max )
+   call system_clock(t_gen, clock_rate, clock_max )
+   write(*,'(a, e8.2)') 'Time for generating the phantom image: ',real(t_gen-t0)/real(clock_rate)
+   write(*,'(a, e8.2)') 'Time for distributing the image: ',0.
 
 ! Add noise
    f_noisy = imnoise( f_phantom, stddev )
    err = sqrt( sum( (f_noisy - f_phantom)**2 ) )/n
-   write(*,'(a,e8.2)') 'Noisy image, Sigma = ',err
+
+   call system_clock(t_noise, clock_rate, clock_max )
+
+   write(*,'(a, e8.2)') 'Time for adding noise: ',real(t_noise-t_gen)/real(clock_rate)
+   write(*,'(a, e8.2)') 'Time for gathering the noisy image: ', 0.
+   write(*,*)   
 
 ! Filter the image
-   f_filtered = cg( f_noisy, lambda )
-   err = sqrt( sum( (f_filtered - f_phantom)**2 ) )/n
-   write(*,'(a,e8.2)') 'Filtered image, Sigma = ',err
 
-   call system_clock ( te, clock_rate, clock_max )
+   f_filtered = cg( f_noisy, lambda )
+   ! err = sqrt( sum( (f_filtered - f_phantom)**2 ) )/n
+
+   call system_clock(t_comp, clock_rate, clock_max )
+   write(*,'(a, e8.2)') 'Time for computation: ',real(t_comp-t_noise)/real(clock_rate)
+   
 
 ! Plot the results
    call gif_images( f_phantom, f_noisy, f_filtered )
-
-! Report timings
    call system_clock ( t1, clock_rate, clock_max )
-   write(*,'(a,e8.2,a)') 'Elapsed time for filtering = ', real(te-tb)/real(clock_rate), 's.'
-   write(*,'(a,e8.2,a)') 'Total elapsed time     = ', real(t1-t0)/real(clock_rate), 's.'
-   write(*,'(a)') '_________________________________________________________________________' 
 
+   write(*,'(a, e8.2)') 'Time for gathering and writing to file ',real(t1-t_comp)/real(clock_rate)
+   write(*,*)
+   write(*,'(a,e8.2)') 'Total Time: ',real(t1-t0)/real(clock_rate)
 contains
 
 function cg( f_noisy, lambda ) result(f_filtered)
@@ -89,6 +98,8 @@ function cg( f_noisy, lambda ) result(f_filtered)
    real(kind=8)                :: tol, normr, normb
    integer                     :: it, maxit
 
+   integer                     :: t_test1, t_test2, clock_rate, clock_max
+
    if ( lambda == 0. ) then
       f_filtered = f_noisy
       return
@@ -98,11 +109,20 @@ function cg( f_noisy, lambda ) result(f_filtered)
    tol   = 1.e-8
    b = lambda*f_noisy
    x = f_noisy
+
+
    r = b - mv( x, lambda )
+   
+
    p = r
+   
    Ap = mv( p, lambda )
 
+   call system_clock(t_test1, clock_rate, clock_max)
    gamma = inprod(r,r)
+   call system_clock (t_test2, clock_rate, clock_max)
+   write(*, '(5x, a, e8.2)') "Time for calculating inprod", real(t_test2-t_test1)/real(clock_rate)
+
    normr = sqrt( gamma )
    normb = sqrt( inprod(b,b) )
 

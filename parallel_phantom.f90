@@ -22,15 +22,18 @@ program phantom
    real(kind=8)                :: stddev, err, lambda
    real(kind=8), allocatable   :: f_phantom(:,:), f_noisy(:,:), f_filtered(:,:)
    real(kind=8), allocatable   :: f_local(:,:)[:]
-   real(kind = 8) :: f_test(512,512)
-
-   integer, dimension(3,3) :: matrix = reshape((/1, 2, 3, 4, 5, 6, 7, 8, 9/), (/3, 3/))
 
 ! For timing:
    integer                     :: t0, t_gen, t_distr, t_noise, t_gather, t_comp, t1, clock_rate, clock_max
 
 ! For parallelizing the program
    integer :: np, me
+
+   ! Debugging
+   logical :: debug = .false.
+
+
+   OPEN(UNIT=10, FILE='output.out', STATUS='old', POSITION='APPEND')
 
    me = this_image()
    np = num_images()
@@ -71,8 +74,10 @@ program phantom
    if ( mod(n, np_root) /= 0) then
       if(me == 1) then
          write(*,*) 'Error: n must be divisible by sqrt(np)'
+         ! Add a small amount of pixels to make n divisible by np_root
+         write (*,*) "Added ", np_root - mod(n, np_root), " pixels to n"
       end if
-      stop
+      n = n + np_root - mod(n, np_root)
    end if
 
    if (me == 1) then
@@ -94,20 +99,14 @@ program phantom
 
    allocate( f_local(nx,ny)[*] )
 
-
-   
-
-   ! if (me == 1) then
-   !    ! write the matrix in matrix form
-      
-   !    write(*,*) reshape(matrix, (/9/))
-   ! end if
 ! Generate phantom image
    if (me == 1) then
       call shepp_logan( f_phantom, n)
 
       call system_clock(t_gen, clock_rate, clock_max )
-      write(*,'(a, e8.2)') 'Time for generating the phantom image: ',real(t_gen-t0)/real(clock_rate)
+      if (debug) then
+         write(*,'(a, e8.2)') 'Time for generating the phantom image: ',real(t_gen-t0)/real(clock_rate)
+      end if
    end if 
 
    sync all
@@ -117,7 +116,9 @@ program phantom
 
    if (me == 1) then
       call system_clock(t_distr, clock_rate, clock_max )
-      write(*,'(a, e8.2)') 'Time for distributing the image: ',real(t_distr-t_gen)/real(clock_rate)
+      if (debug) then
+         write(*,'(a, e8.2)') 'Time for distributing the image: ',real(t_distr-t_gen)/real(clock_rate)
+      end if
    end if
 
 ! Add noise
@@ -125,7 +126,9 @@ program phantom
 
    if (me == 1) then
       call system_clock(t_noise, clock_rate, clock_max )
-      write(*,'(a, e8.2)') 'Time for adding noise: ',real(t_noise-t_distr)/real(clock_rate)
+      if (debug) then
+         write(*,'(a, e8.2)') 'Time for adding noise: ',real(t_noise-t_distr)/real(clock_rate)
+      end if
    end if
 
 
@@ -134,23 +137,19 @@ program phantom
 
    if (me == 1) then
       call system_clock(t_gather, clock_rate, clock_max )
-      write(*,'(a, e8.2)') 'Time for gathering the noisy image: ',real(t_gather-t_noise)/real(clock_rate)
-      write(*,*)
+      if (debug) then
+         write(*,'(a, e8.2)') 'Time for gathering the noisy image: ',real(t_gather-t_noise)/real(clock_rate)
+         write(*,*)
+      end if
    end if
-
-
-   ! Test the matrix-vector multiplication
-   ! call test_mv(lambda, me, np_root)
-
-   ! Test the inner product
-   ! call test_inproduct(me, np_root)
-
 
    f_local = cg(f_local, lambda, nx, ny, me, np_root)
 
    if (me == 1) then
       call system_clock(t_comp, clock_rate, clock_max )
-      write(*,'(a, e8.2)') 'Time for computation: ',real(t_comp-t_gather)/real(clock_rate)
+      if (debug) then
+         write(*,'(a, e8.2)') 'Time for computation: ',real(t_comp-t_gather)/real(clock_rate)
+      end if
    end if
 
    call gather_image(f_filtered, f_local, nx, ny, me, np, np_root)
@@ -159,10 +158,14 @@ program phantom
    if (me == 1) then
       call gif_images(f_phantom, f_noisy, f_filtered)
       call system_clock ( t1, clock_rate, clock_max )
-      write(*,'(a, e8.2)') 'Time for gathering and writing to file ',real(t1-t_comp)/real(clock_rate)
-      write(*,*)
-      write(*,'(a,e8.2)') 'Total Time: ',real(t1-t0)/real(clock_rate)
+      if (debug) then
+         write(*,'(a, e8.2)') 'Time for gathering and writing to file ',real(t1-t_comp)/real(clock_rate)
+         write(*,*)
+      end if
+      WRITE(10, '(A1, E15.7, A1, I0, A1, I0)') ',',  real(t1-t0)/real(clock_rate), ',', np, ',', n
    end if
+
+   CLOSE(10)
    
 ! Timing for adding noise and filtering (part of the program that will be parallelised)
 !   call system_clock ( tb, clock_rate, clock_max )
@@ -218,7 +221,6 @@ subroutine gather_image(gather_array, local_array, nx, ny, me, np, np_root )
    integer                   :: i, k, l
 
    allocate(local_flattened(nx*ny)[*])
-
    local_flattened(:)[me] = reshape(local_array(:,:)[me], [nx*ny])
 
    if (me == 1) then
@@ -288,7 +290,6 @@ subroutine gif_images( model_image, noisy_image, filtered_image )
    where ( gif_image > n_colours-1 ) gif_image = n_colours-1
    where ( gif_image < 0 ) gif_image = 0
    call write_animated_gif( gif_name, gif_image, map )
-
 end subroutine gif_images
 
 function cg( f_local, lambda, nx, ny, me, np_root ) result(f_local_filtered)
@@ -310,8 +311,8 @@ function cg( f_local, lambda, nx, ny, me, np_root ) result(f_local_filtered)
    real(kind=8)                :: tol, normr, normb
    integer                     :: it, maxit
 
-
    allocate(p(nx,ny)[*])
+
 
    if ( lambda == 0. ) then
       f_local_filtered = f_local(:,:)
@@ -322,7 +323,11 @@ function cg( f_local, lambda, nx, ny, me, np_root ) result(f_local_filtered)
    tol   = 1.e-8
 
    b = lambda*f_local(:,:)
+
+
+
    r = b - mv( f_local, lambda, nx, ny, me, np_root )
+
 
    p(:,:) = r
 
@@ -330,7 +335,9 @@ function cg( f_local, lambda, nx, ny, me, np_root ) result(f_local_filtered)
 
 
    Ap = mv( p, lambda, nx, ny, me, np_root )
+
    gamma = dot_butterfly_2d(r,r)
+
    normr = sqrt( gamma )
    normb = sqrt( dot_butterfly_2d(b,b) )
 
@@ -355,8 +362,7 @@ function cg( f_local, lambda, nx, ny, me, np_root ) result(f_local_filtered)
 
    f_local_filtered = f_local(:,:)
    if (me == 1) then
-      write(*,'(a,i4,1x,a,e9.3)') 'CG terminated after ',it, &
-              'iterations with relative       residual norm ', normr/normb
+      WRITE(10, '(I0, A1, E15.7)', ADVANCE='NO') it, ',', normr/normb
    end if
 
    deallocate(p)
@@ -505,6 +511,7 @@ real(8) function dot_butterfly_2d(x,y)
    ! Flatten the 2D arrays and call the 1D butterfly reduction
    implicit none
    real(kind=8), dimension(:,:), intent(in) :: x, y
+   integer                                  :: np
    real(kind=8), dimension(:), allocatable :: x_flat, y_flat
    real(kind=8) :: s
 
@@ -516,12 +523,50 @@ real(8) function dot_butterfly_2d(x,y)
    x_flat = reshape(x, [size(x)])
    y_flat = reshape(y, [size(y)])
 
-   s = dot_butterfly(x_flat, y_flat)
+   ! If the amount of processors is a power of 2 use butterfly,
+   ! Else, use allgather
+   np = num_images()
+
+   if (np /= 2**(log(dble(np))/log(2.d0))) then
+      s = dot_allgather(x_flat, y_flat)
+   else
+      s = dot_butterfly(x_flat, y_flat)
+   end if
 
    dot_butterfly_2d = s
 
    deallocate(x_flat, y_flat)
 end function dot_butterfly_2d
+
+real(8) function dot_allgather(x, y)
+
+implicit none
+real(kind=8), dimension(:), intent(in) :: x, y
+real(kind=8), save, allocatable :: local_dots(:)[:]
+integer :: me, np, i
+
+np = num_images()
+me = this_image()
+
+if (.not. allocated(local_dots)) then
+    allocate(local_dots(np)[*])
+end if
+
+if (size(local_dots) /= np) then
+    allocate(local_dots(np)[*])
+end if
+
+local_dots(me) = dot_product(x, y)
+
+do i=1,np
+    local_dots(me)[i] = local_dots(me)
+end do
+
+sync all
+
+dot_allgather = sum(local_dots)
+
+end function dot_allgather
 
 real(8) function dot_butterfly(x, y)
    implicit none
