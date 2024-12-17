@@ -1,0 +1,8 @@
+# Ignore junk made by compiling
+*.o 
+*.mod 
+*.gif 
+*.out
+
+# Ignore the report folder
+/report/

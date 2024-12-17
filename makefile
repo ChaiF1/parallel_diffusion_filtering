@@ -37,7 +37,7 @@ download:
 	scp -p cfillerup@login.delftblue.tudelft.nl:~/diffusion_filtering/output.out ./
 
 clean:
-	rm -f *.o *.mod *.gif phantom parallel_phantom
+	rm -f *.o *.mod *.gif *.out phantom parallel_phantom
 
 # Upload to delftblue
 # rsync -e "ssh -J cfillerup@student-linux.tudelft.nl" -avr --no-perms "$(PWD)" cfillerup@login.delftblue.tudelft.nl:~/
