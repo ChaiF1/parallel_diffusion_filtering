@@ -20,11 +20,8 @@ make parallel_phantom
 lambda=0.1
 sigma=0.5
 
-# Create the file output.log with as first line "it, error, time, np\n"
-echo "it, error, time, np, n" > output.out
-
-# Run the program with, 4, 9, 16, 25, 36, 49, 64 processors
-# with npx 512, 1024, 2
+# Create the file output.log with as first line "npx, np, total_time, comm_time"
+echo "npx, np, total_time, comm_time" > output.out
 
 for n in 4 9 16 25 36 49 64
 do

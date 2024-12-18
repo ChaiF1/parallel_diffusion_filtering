@@ -1,20 +1,38 @@
-! In this program, we apply diffusion filtering to the "Sheff Logan" test filtering
+! In this program, we apply diffusion filtering to the "Sheff Logan" test filtering. 
+! We perform the diffusion filtering by implementing a parallelized version of the conjugate gradient algorithm
 ! This is part of a course for parallel computing. We have been provided a serial version of the code and our supposed to parallelize it
-! The first step is to write code to 
-
-!The first step is to distribute the image over the processors. Generate the noise-free image on the main processor. Define a block-wise domain decomposition, with dx blocks in x-direction and dy 
-!blocks in y direction. Assign a domain to each processor and send the corresponding part of the image to this processor. Every processor should add noise to its part of the image. At the end of 
-!the program, all the processors have to send their part of the (noisy and filtered) image to the main processor. This processor should assemble all these parts of the image to one image and write 
-!this to file in gif format. Add this to the code. Do not apply filtering yet, test if it works correctly for the noisy image.
+module timing_module
+   implicit none
+   
+   ! Timing variables to track communication and computation
+   real(kind=8), save :: total_communication_time = 0.0
+   real(kind=8), save :: total_computation_time = 0.0
+   
+contains
+   subroutine reset_timings()
+      total_communication_time = 0.0
+      total_computation_time = 0.0
+   end subroutine reset_timings
+   
+   subroutine print_timings(me)
+      integer, intent(in) :: me
+      if (me == 1) then
+         print '(4x, A,F10.5)', 'Of which communication: ', total_communication_time
+         print '(4x, A,F10.5)', 'Of which computation:  ', total_computation_time
+         ! Print a newline
+         print *
+      end if
+   end subroutine print_timings
+end module timing_module
 
 
 program phantom
-
    use gif_module
+   use timing_module
 
    implicit none
 
-! Input parameters that define the problem:
+   ! Input parameters that define the problem:
    character(len=80)           :: arg, value
 
    integer                     :: n, nx, ny, np_row, np_col
@@ -23,10 +41,10 @@ program phantom
    real(kind=8), allocatable   :: f_phantom(:,:), f_noisy(:,:), f_filtered(:,:)
    real(kind=8), allocatable   :: f_local(:,:)[:]
 
-! For timing:
-   integer                     :: t0, t_gen, t_distr, t_noise, t_gather, t_comp, t1, clock_rate, clock_max
+   ! For timing:
+   integer                     :: t0, t_gen, t_distr, t_noise, t_gather, t_cg, t1, clock_rate, clock_max
 
-! For parallelizing the program
+   ! For parallelizing the program
    integer :: np, me
 
    ! Debugging
@@ -44,8 +62,8 @@ program phantom
    lambda = 0.1
 
    ! amount of processors in a row and in a column respectively
-   np_row = 4
-   np_col = 1
+   np_row = 2
+   np_col = 4
 
    ! Read parameters from command line:
    do i = 1, command_argument_count()
@@ -61,15 +79,14 @@ program phantom
          case('-lambda')
             call get_command_argument(i+1, value)
             read(value,'(e9.4)') lambda
-         ! case('-debug')
-         !    call get_command_argument(i+1, value)
-         !    read(value, '(l1)') debug
-         ! case ('-np_row')
-         !    call get_command_argument(i+1, value)
-         !    read(value, '(i6') np_row
-         ! case ('-np_col')
-         !    call get_command_argument(i+1, value)
-         !    read(value, '(i6') np_col
+         case('-debug')
+            debug = .true.
+         case ('-np_row')
+            call get_command_argument(i+1, value)
+            read(value, '(i6)') np_row
+         case ('-np_col')
+            call get_command_argument(i+1, value)
+            read(value, '(i6)') np_col
       end select
    end do
 
@@ -96,8 +113,7 @@ program phantom
       write(*,*) 
       call system_clock ( t0, clock_rate, clock_max )
    end if
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-
+!!!!!!!!!!!!!!!!!Testing done, Actual program here !!!!!!!!!!!!
    ! Input is set up correctly, we now start with the actual program.
 
    ! Block sizes
@@ -111,7 +127,7 @@ program phantom
 
    allocate( f_local(nx,ny)[*] )
 
-! Generate phantom image
+   ! Generate phantom image
    if (me == 1) then
       call shepp_logan( f_phantom, n)
 
@@ -160,9 +176,9 @@ program phantom
 
    ! Debugging timing for conjugate gradient
    if (me == 1) then
-      call system_clock(t_comp, clock_rate, clock_max )
+      call system_clock(t_cg, clock_rate, clock_max )
       if (debug) then
-         write(*,'(a, e8.2)') 'Time for computation: ',real(t_comp-t_gather)/real(clock_rate)
+         write(*,'(a, e8.2)') 'Time for CG algorithm: ',real(t_cg-t_gather)/real(clock_rate)
       end if
    end if
 
@@ -171,11 +187,14 @@ program phantom
    ! Write the image to file
    ! If debug is on, report timing on gathering the image
    ! Always report the total time of the program
+   call print_timings(me)
+
    if (me == 1) then
       call gif_images(f_phantom, f_noisy, f_filtered)
       call system_clock ( t1, clock_rate, clock_max )
       if (debug) then
-         write(*,'(a, e8.2)') 'Time for gathering and writing to file ',real(t1-t_comp)/real(clock_rate)
+         write(*,'(a, e8.2)') 'Time for gathering and writing to file ',real(t1-t_cg)/real(clock_rate)
+         write(*, '(a, e8.2)') 'Total time for algorithm', real(t1-t0)/real(clock_rate) 
          write(*,*)
       end if
       WRITE(10, '(A1, E15.7, A1, I0, A1, I0)') ',',  real(t1-t0)/real(clock_rate), ',', np, ',', n
@@ -183,7 +202,6 @@ program phantom
 
    ! Close the output file
    CLOSE(10)
-
 contains
 
 subroutine distribute_image( f_phantom, f_local, me, np_row, np_col)
@@ -390,14 +408,15 @@ function cg( f_local, lambda, me, np_row, np_col ) result(f_local_filtered)
    end do
 
    f_local_filtered = f_local(:,:)
-   if (me == 1) then
-      WRITE(10, '(I0, A1, E15.7)', ADVANCE='NO') it, ',', normr/normb
+   if (me == 1 .and. debug) then
+      write(*,'(a,i4,1x,a,e9.3)') 'CG terminated after ',it, &
+              'iterations with relative residual norm ', normr/normb
    end if
-
    deallocate(p)
 end function cg
 
 function mv( v, lambda, me, np_row, np_col) result(w)
+   use timing_module
    ! Matrix vector multiplication: w = lambda v + A v
    ! in which A represents -Laplacian with Neumann boundary conditions
    !
@@ -406,11 +425,17 @@ function mv( v, lambda, me, np_row, np_col) result(w)
    real(kind=8), intent(in)    :: lambda
    real(kind=8), intent(in)    :: v(:,:)[*]
    integer, intent(in)         :: np_row, np_col, me
+   integer                     :: t_com
 
    real(kind=8), allocatable   :: v_flattened(:)[:]
    real(kind=8)                :: w(size(v,1),size(v,2))
    real(kind=8)                :: v_halo(0:size(v,1)+1,0:size(v,2)+1)
    integer                     :: i, j, nx, ny
+
+   integer                     :: t_start_comm, t_end_comm, count_rate, count_max
+   integer                     :: t_start_comp, t_end_comp
+   real(kind=8)                :: comm_time, comp_time
+
    ! Add extra row/column around the domain to account for boundary conditions
    ! or data on other processor. Note that these points are outside the domain.
    ! They can be eliminated by the homogeneous Neumann condition. This condition
@@ -458,6 +483,11 @@ function mv( v, lambda, me, np_row, np_col) result(w)
    ! Top boundary is given by v_flattened(size(v_flattened) - nx + 1 :)
    ! Bottom boundary is given by v_flattened(1 : nx )
 
+   ! Start communication time
+   if (me == 1) then
+      call system_clock(t_start_comm, count_rate, count_max)
+   end if
+
    ! set LEFT boundary
    if (mod(me-1, np_row) /= 0) then
       v_halo(0, 1:ny) = v_flattened(nx:nx*ny:nx)[me-1]
@@ -481,6 +511,19 @@ function mv( v, lambda, me, np_row, np_col) result(w)
    end if
    sync all
 
+   ! End communication time
+   if (me == 1) then
+      call system_clock(t_end_comm, count_rate, count_max)
+      comm_time = real(t_end_comm - t_start_comm, kind=8) / real(clock_rate, kind=8)
+      total_communication_time = total_communication_time + comm_time
+   end if
+   
+
+
+   ! Start computation time
+   if (me == 1) then
+      call system_clock(t_start_comp, count_rate, count_max)
+   end if
    ! Now we can just perform the stencil operation:
    w = lambda*v(:,:)
    do j = 1, ny
@@ -489,6 +532,13 @@ function mv( v, lambda, me, np_row, np_col) result(w)
              + 4.*v_halo(i, j) -v_halo( i-1,  j) -v_halo( i+1, j) -v_halo( i, j-1) -v_halo( i, j+1)
       end do
    end do
+
+   if (me == 1) then
+      call system_clock(t_end_comp, count_rate, count_max)
+   end if
+   comp_time = real(t_end_comp - t_start_comp, kind=8) / real(clock_rate, kind=8)
+   total_computation_time = total_computation_time + comp_time
+
 end function mv
 
 real(8) function dot_butterfly_2d(x,y)
@@ -523,33 +573,31 @@ real(8) function dot_butterfly_2d(x,y)
 end function dot_butterfly_2d
 
 real(8) function dot_allgather(x, y)
-
-implicit none
-real(kind=8), dimension(:), intent(in) :: x, y
-real(kind=8), save, allocatable :: local_dots(:)[:]
-integer :: me, np, i
-
-np = num_images()
-me = this_image()
-
-if (.not. allocated(local_dots)) then
-    allocate(local_dots(np)[*])
-end if
-
-if (size(local_dots) /= np) then
-    allocate(local_dots(np)[*])
-end if
-
-local_dots(me) = dot_product(x, y)
-
-do i=1,np
-    local_dots(me)[i] = local_dots(me)
-end do
-
-sync all
-
-dot_allgather = sum(local_dots)
-
+   implicit none
+   real(kind=8), dimension(:), intent(in) :: x, y
+   real(kind=8), save, allocatable :: local_dots(:)[:]
+   integer :: me, np, i
+   
+   np = num_images()
+   me = this_image()
+   
+   if (.not. allocated(local_dots)) then
+       allocate(local_dots(np)[*])
+   end if
+   
+   if (size(local_dots) /= np) then
+       allocate(local_dots(np)[*])
+   end if
+   
+   local_dots(me) = dot_product(x, y)
+   
+   do i=1,np
+       local_dots(me)[i] = local_dots(me)
+   end do
+   
+   sync all
+   
+   dot_allgather = sum(local_dots)
 end function dot_allgather
 
 real(8) function dot_butterfly(x, y)
