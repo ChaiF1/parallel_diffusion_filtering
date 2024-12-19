@@ -155,8 +155,8 @@ function cg( f_noisy, lambda ) result(f_filtered)
    end do
 
    f_filtered = x
-   write(*,'(a,i4,1x,a,e9.3)') 'CG terminated after ',it, &
-           'iterations with relative residual norm ', normr/normb
+      write(*,'(a,i4,1x,a,e9.3)') 'CG terminated after ',it, &
+              'iterations with relative residual norm ', normr/normb
 
 end function cg
 

@@ -187,7 +187,9 @@ program phantom
    ! Write the image to file
    ! If debug is on, report timing on gathering the image
    ! Always report the total time of the program
-   call print_timings(me)
+   if (debug) then
+      call print_timings(me)
+   end if
 
    if (me == 1) then
       call gif_images(f_phantom, f_noisy, f_filtered)
@@ -197,7 +199,10 @@ program phantom
          write(*, '(a, e8.2)') 'Total time for algorithm', real(t1-t0)/real(clock_rate) 
          write(*,*)
       end if
-      WRITE(10, '(A1, E15.7, A1, I0, A1, I0)') ',',  real(t1-t0)/real(clock_rate), ',', np, ',', n
+      ! Ensure the following line is printed to the output file with , seperators.
+      !WRITE(10, *) n, np_row, np_col, real(t1-t0)/real(clock_rate), total_communication_time, total_computation_time
+      WRITE(10, '(I0, ",", I0, ",", I0, ",", F0.6, ",", F0.6, ",", F0.6)') n, np_row, np_col, real(t1-t0)/real(clock_rate), total_communication_time, total_computation_time
+
    end if
 
    ! Close the output file
@@ -399,6 +404,7 @@ function cg( f_local, lambda, me, np_row, np_col ) result(f_local_filtered)
 
       beta  = 1/gamma
       gamma = dot_butterfly_2d(r,r)
+
       normr = sqrt(gamma)
       beta  = gamma*beta
       p(:,:) = r + beta*p(:,:)
@@ -493,7 +499,6 @@ function mv( v, lambda, me, np_row, np_col) result(w)
       v_halo(0, 1:ny) = v_flattened(nx:nx*ny:nx)[me-1]
    end if
 
-
    ! set RIGHT boundary
    if (mod(me, np_row) /= 0) then      
       v_halo(nx+1, 1:ny) = v_flattened(1 : (nx-1)*ny + 1 : nx)[me+1]
@@ -509,6 +514,7 @@ function mv( v, lambda, me, np_row, np_col) result(w)
    if (me > np_row) then
       v_halo( 1: nx, 0 ) = v_flattened(size(v_flattened) - nx + 1 :)[me - np_row]
    end if
+
    sync all
 
    ! End communication time
@@ -561,10 +567,13 @@ real(8) function dot_butterfly_2d(x,y)
    ! Else, use allgather
    np = num_images()
 
-   if (np /= 2**(log(dble(np))/log(2.d0))) then
-      s = dot_allgather(x_flat, y_flat)
-   else
+   ! Check if np is a power of 2
+   if (popcnt(np) == 1) then
+      ! If so, use dot butterfly
       s = dot_butterfly(x_flat, y_flat)
+   else
+      ! Else use allgather
+      s = dot_allgather(x_flat, y_flat)
    end if
 
    dot_butterfly_2d = s
